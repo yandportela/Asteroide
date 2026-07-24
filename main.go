@@ -52,6 +52,7 @@ const (
 	playerCollisionWidth  = playerWidth - 10
 	playerCollisionHeight = playerHeight - 10
 	maxGameTime           = 120.0 // 2 minutos em segundos
+	maxPowerLevel         = 7
 )
 
 type Bullet struct {
@@ -71,6 +72,7 @@ type Game struct {
 	startTime  time.Time
 	score      int // Agora é inteiro
 	destroyed  int
+	powerLevel int
 	explosions []Explosion
 	powerUps   []PowerUp
 	gameTime   float64 // Tempo decorrido
@@ -94,21 +96,28 @@ type PowerUp struct {
 
 var (
 	regularFont font.Face
+    smallFont   font.Face
 )
 
 func init() {
-	fontBytes, err := os.ReadFile("Roboto-Regular.ttf") // Certifique-se de ter esse arquivo na pasta do projeto
-	if err != nil {
-		log.Fatal(err)
-	}
-	ttf, err := opentype.Parse(fontBytes)
-	if err != nil {
-		log.Fatal(err)
-	}
-	regularFont, err = opentype.NewFace(ttf, &opentype.FaceOptions{
-		Size:    48, // Aumente ou diminua para ajustar o tamanho do texto
-		DPI:     72,
-		Hinting: font.HintingFull,
+    fontBytes, err := os.ReadFile("Roboto-Regular.ttf") // Certifique-se de ter esse arquivo na pasta do projeto
+    if err != nil {
+        log.Fatal(err)
+    }
+    ttf, err := opentype.Parse(fontBytes)
+    if err != nil {
+        log.Fatal(err)
+    }
+    regularFont, err = opentype.NewFace(ttf, &opentype.FaceOptions{
+        Size:    48, // Aumente ou diminua para ajustar o tamanho do texto
+        DPI:     72,
+        Hinting: font.HintingFull,
+    })
+    if err != nil {
+        log.Fatal(err)
+    }
+    smallFont, err = opentype.NewFace(ttf, &opentype.FaceOptions{
+        Size:    24,
 	})
 	if err != nil {
 		log.Fatal(err)
@@ -161,8 +170,8 @@ func (g *Game) Update() error {
 	// Atualiza cooldown do tiro
 	bulletCooldown.Update()
 
-	// Disparo de bolinha ao pressionar E (com cooldown)
-	if ebiten.IsKeyPressed(ebiten.KeyE) && bulletCooldown.Ready() {
+// Disparo de bolinha ao pressionar Espaço (com cooldown)
+    if ebiten.IsKeyPressed(ebiten.KeySpace) && bulletCooldown.Ready() {
 		b := Bullet{
 			x:      g.playerX + playerWidth/2 - 5,
 			y:      g.playerY,
@@ -284,6 +293,9 @@ func (g *Game) Update() error {
 				} else {
 					bulletCooldownFrames = 20
 				}
+				if g.powerLevel < maxPowerLevel {
+					g.powerLevel++
+				}
 			}
 			if p.active && p.y < screenHeight {
 				activePowerUps = append(activePowerUps, p)
@@ -301,13 +313,17 @@ func (g *Game) Draw(screen *ebiten.Image) {
 	op.GeoM.Translate(g.playerX, g.playerY)
 	screen.DrawImage(g.player, op)
 
-	// Exibe o tempo restante
+	// Exibe o tempo restante e comandos
 	tempoRestante := int(maxGameTime - g.gameTime)
 	minutos := tempoRestante / 60
 	segundos := tempoRestante % 60
-	text.Draw(screen, fmt.Sprintf("Tempo: %02d:%02d", minutos, segundos), regularFont, 20, 60, color.White)
-	text.Draw(screen, fmt.Sprintf("Pontuação: %d", g.score), regularFont, 20, 120, color.White)
-	text.Draw(screen, fmt.Sprintf("Destruidos: %d", g.destroyed), regularFont, 20, 180, color.White)
+	bgColor := color.RGBA{0, 0, 0, 160}
+	ebitenutil.DrawRect(screen, 10, 30, 420, 280, bgColor)
+	text.Draw(screen, fmt.Sprintf("Tempo: %02d:%02d", minutos, segundos), regularFont, 20, 80, color.White)
+	text.Draw(screen, fmt.Sprintf("Pontuação: %d", g.score), regularFont, 20, 140, color.White)
+	text.Draw(screen, fmt.Sprintf("Destruidos: %d", g.destroyed), regularFont, 20, 200, color.White)
+	text.Draw(screen, fmt.Sprintf("Power: %d/%d", g.powerLevel, maxPowerLevel), regularFont, 20, 260, color.White)
+	text.Draw(screen, "Espaço: Atirar | R: Reiniciar", regularFont, 20, 320, color.White)
 
 	// Desenha inimigos
 	for _, e := range g.enemies {
@@ -412,6 +428,7 @@ func (g *Game) restart() {
 	g.score = 0
 	g.gameOver = false
 	g.destroyed = 0
+	g.powerLevel = 0
 	g.gameTime = 0
 	bulletCooldownFrames = 30
 }
