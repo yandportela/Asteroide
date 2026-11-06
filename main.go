@@ -15,6 +15,7 @@ import (
 	"github.com/hajimehoshi/ebiten/v2/ebitenutil"
 	"github.com/hajimehoshi/ebiten/v2/inpututil"
 	"github.com/hajimehoshi/ebiten/v2/text"
+	xdraw "golang.org/x/image/draw"
 	"golang.org/x/image/font"
 	"golang.org/x/image/font/opentype"
 	"golang.org/x/image/font/sfnt"
@@ -24,12 +25,12 @@ const (
 	screenWidth  = 1920
 	screenHeight = 1080
 
-	playerWidth  = 128
-	playerHeight = 128
+	playerWidth  = 112
+	playerHeight = 112
 	playerSpeed  = 8.0
 
-	playerHitW = 44.0
-	playerHitH = 44.0
+	playerHitW = 40.0
+	playerHitH = 40.0
 
 	maxLives    = 3
 	maxPower    = 5
@@ -123,6 +124,8 @@ type Bullet struct {
 	color  color.RGBA
 	wave   float64
 	phase  float64
+	pierce int
+	homing float64
 }
 
 type Enemy struct {
@@ -539,6 +542,12 @@ type shotSpec struct {
 	dx  float64
 }
 
+type homingShot struct {
+	off    float64
+	dx     float64
+	homing float64
+}
+
 func (g *Game) handleShooting() {
 	if !ebiten.IsKeyPressed(ebiten.KeySpace) || g.fireCooldown > 0 {
 		return
@@ -572,7 +581,7 @@ func (g *Game) handleShooting() {
 
 func (g *Game) shootInterceptor() {
 	cx := g.playerX + playerWidth/2
-	cy := g.playerY + 18
+	cy := g.playerY + playerHeight*0.15
 	col := color.RGBA{90, 210, 255, 255}
 
 	var shots []shotSpec
@@ -580,25 +589,29 @@ func (g *Game) shootInterceptor() {
 	case 0:
 		shots = []shotSpec{{0, 0}}
 	case 1:
-		shots = []shotSpec{{-10, 0}, {10, 0}}
+		shots = []shotSpec{{-8, 0}, {8, 0}}
 	case 2:
-		shots = []shotSpec{{0, 0}, {-14, -1.6}, {14, 1.6}}
+		shots = []shotSpec{{0, 0}, {-16, -0.8}, {16, 0.8}}
 	case 3:
-		shots = []shotSpec{{-9, 0}, {9, 0}, {-22, -2.6}, {22, 2.6}}
+		shots = []shotSpec{{-8, 0}, {8, 0}, {-24, -1.2}, {24, 1.2}}
 	case 4:
-		shots = []shotSpec{{0, 0}, {-9, 0}, {9, 0}, {-24, -2.4}, {24, 2.4}}
+		shots = []shotSpec{{0, 0}, {-12, -0.6}, {12, 0.6}, {-28, -1.4}, {28, 1.4}}
 	default:
-		shots = []shotSpec{{0, 0}, {-14, -1.5}, {14, 1.5}, {-28, -3.2}, {28, 3.2}, {-42, -5.0}, {42, 5.0}}
+		shots = []shotSpec{{0, 0}, {-14, -0.8}, {14, 0.8}, {-32, -1.6}, {32, 1.6}}
 	}
 
 	for _, s := range shots {
-		g.addBullet(cx+s.off, cy, s.dx, 17.0, 6, 30, 0, col)
+		g.addBullet(cx+s.off, cy, s.dx, 18.0, 6, 32, 0, col)
+	}
+
+	if g.powerLevel >= 5 {
+		g.addBulletAdvanced(cx, cy-8, 0, 22.0, 8, 56, 2, 4, color.RGBA{170, 245, 255, 255}, 4, 0)
 	}
 }
 
 func (g *Game) shootFortress() {
 	cx := g.playerX + playerWidth/2
-	cy := g.playerY + 18
+	cy := g.playerY + playerHeight*0.15
 	col := color.RGBA{110, 255, 140, 255}
 	g.slowTimer = fortressSlowFrames
 
@@ -616,7 +629,7 @@ func (g *Game) shootFortress() {
 	case 4:
 		count, spread, speed = 7, 1.9, 11.0
 	case 5:
-		count, spread, speed, size = 9, 1.6, 11.0, 14
+		count, spread, speed, size = 9, 1.5, 11.0, 14
 	}
 
 	for i := 0; i < count; i++ {
@@ -624,41 +637,56 @@ func (g *Game) shootFortress() {
 		g.addBullet(cx+t*6, cy, t*spread, speed, size, size, 1, col)
 	}
 
+	if g.powerLevel >= 2 {
+		orbCol := color.RGBA{70, 230, 120, 255}
+		g.addWaveBullet(cx-32, cy+6, -1.1, 8.2, 18, 18, 1, 1, orbCol, 1.4)
+		g.addWaveBullet(cx+32, cy+6, 1.1, 8.2, 18, 18, 1, 1, orbCol, 1.4)
+	}
+
+	if g.powerLevel >= 4 {
+		coreCol := color.RGBA{50, 210, 105, 255}
+		g.addBullet(cx-10, cy+10, 0, 8.0, 28, 28, 1, coreCol)
+		g.addBullet(cx+10, cy+10, 0, 8.0, 28, 28, 1, coreCol)
+	}
+
 	if g.powerLevel >= 5 {
-		g.addBullet(cx-7, cy+6, 0, 8.5, 26, 26, 1, color.RGBA{60, 220, 110, 255})
-		g.addBullet(cx+7, cy+6, 0, 8.5, 26, 26, 1, color.RGBA{60, 220, 110, 255})
+		g.addBulletAdvanced(cx, cy+16, 0, 6.5, 42, 42, 2, 6, color.RGBA{45, 190, 95, 255}, 1, 0)
 	}
 }
 
 func (g *Game) shootHunter() {
 	cx := g.playerX + playerWidth/2
-	cy := g.playerY + 18
+	cy := g.playerY + playerHeight*0.15
 	col := color.RGBA{255, 120, 80, 255}
 
-	var shots []shotSpec
+	var shots []homingShot
 	switch g.powerLevel {
 	case 0:
-		shots = []shotSpec{{-9, 0}, {9, 0}}
+		shots = []homingShot{{-9, 0, 0}, {9, 0, 0}}
 	case 1:
-		shots = []shotSpec{{0, 0}, {-12, 0}, {12, 0}}
+		shots = []homingShot{{0, 0, 0}, {-12, 0, 0}, {12, 0, 0}}
 	case 2:
-		shots = []shotSpec{{-8, 0}, {8, 0}, {-20, -2.4}, {20, 2.4}}
+		shots = []homingShot{{-8, 0, 0}, {8, 0, 0}, {-20, -2.4, 0}, {20, 2.4, 0}}
 	case 3:
-		shots = []shotSpec{{-8, -0.8}, {8, 0.8}, {0, 0}, {-22, -2.8}, {22, 2.8}}
+		shots = []homingShot{{0, 0, 0}, {-10, -0.8, 0}, {10, 0.8, 0}, {-24, -2.8, 0}, {24, 2.8, 0}}
 	case 4:
-		shots = []shotSpec{{-8, 0}, {8, 0}, {-20, -1.8}, {20, 1.8}, {0, 0}, {-32, -3.4}, {32, 3.4}}
+		shots = []homingShot{{0, 0, 0.8}, {-9, 0, 1.2}, {9, 0, 1.2}, {-22, -1.8, 2.2}, {22, 1.8, 2.2}, {-36, -3.4, 3.0}, {36, 3.4, 3.0}}
 	default:
-		shots = []shotSpec{{-8, 0}, {8, 0}, {-20, -1.6}, {20, 1.6}, {-32, -3.2}, {32, 3.2}, {0, 0}, {-44, -5.0}, {44, 5.0}}
+		shots = []homingShot{{0, 0, 2.0}, {-8, 0, 2.0}, {8, 0, 2.0}, {-18, -1.2, 2.6}, {18, 1.2, 2.6}, {-30, -2.6, 3.2}, {30, 2.6, 3.2}, {-44, -4.2, 3.6}, {44, 4.2, 3.6}}
 	}
 
 	for _, s := range shots {
-		g.addBullet(cx+s.off, cy, s.dx, 15.5, 8, 20, 2, col)
+		g.addBulletAdvanced(cx+s.off, cy, s.dx, 15.5, 8, 22, 1, 2, col, 0, s.homing)
+	}
+
+	if g.powerLevel >= 5 {
+		g.addBulletAdvanced(cx, cy-6, 0, 17.0, 16, 30, 2, 5, color.RGBA{255, 200, 150, 255}, 0, 2.5)
 	}
 }
 
 func (g *Game) shootVanguard() {
 	cx := g.playerX + playerWidth/2
-	cy := g.playerY + 18
+	cy := g.playerY + playerHeight*0.15
 	col := color.RGBA{255, 200, 80, 255}
 
 	var shots []shotSpec
@@ -670,21 +698,37 @@ func (g *Game) shootVanguard() {
 	case 2:
 		shots = []shotSpec{{0, 0}, {-22, 0}, {22, 0}}
 	case 3:
-		shots = []shotSpec{{-14, 0}, {14, 0}, {-30, -0.8}, {30, 0.8}}
+		shots = []shotSpec{{-15, 0}, {15, 0}}
 	case 4:
-		shots = []shotSpec{{0, 0}, {-16, 0}, {16, 0}, {-32, -1.0}, {32, 1.0}}
+		shots = []shotSpec{{-16, 0}, {16, 0}}
 	default:
-		shots = []shotSpec{{0, 0}, {-18, -0.6}, {18, 0.6}, {-38, -1.2}, {38, 1.2}}
+		shots = []shotSpec{{-18, -0.4}, {18, 0.4}}
 	}
 
 	for _, s := range shots {
 		g.addBulletDamage(cx+s.off, cy, s.dx, 9.5, 18, 38, 2, 3, col)
 	}
+
+	shardCol := color.RGBA{255, 230, 140, 255}
+	switch {
+	case g.powerLevel == 3:
+		g.addBulletDamage(cx, cy-4, 0, 12.0, 12, 28, 1, 5, shardCol)
+		g.addBulletDamage(cx-32, cy+4, -0.9, 11.0, 10, 24, 1, 5, shardCol)
+		g.addBulletDamage(cx+32, cy+4, 0.9, 11.0, 10, 24, 1, 5, shardCol)
+	case g.powerLevel == 4:
+		g.addBulletAdvanced(cx, cy-6, 0, 11.5, 20, 48, 2, 3, color.RGBA{255, 235, 160, 255}, 1, 0)
+		g.addBulletDamage(cx-34, cy+4, -1.0, 11.0, 10, 24, 1, 5, shardCol)
+		g.addBulletDamage(cx+34, cy+4, 1.0, 11.0, 10, 24, 1, 5, shardCol)
+	case g.powerLevel >= 5:
+		g.addBulletAdvanced(cx, cy-8, 0, 13.5, 16, 68, 3, 4, color.RGBA{255, 245, 190, 255}, 4, 0)
+		g.addBulletDamage(cx-36, cy+4, -1.1, 11.5, 10, 24, 1, 5, shardCol)
+		g.addBulletDamage(cx+36, cy+4, 1.1, 11.5, 10, 24, 1, 5, shardCol)
+	}
 }
 
 func (g *Game) shootSpecter() {
 	cx := g.playerX + playerWidth/2
-	cy := g.playerY + 18
+	cy := g.playerY + playerHeight*0.15
 	col := color.RGBA{200, 140, 255, 255}
 
 	var shots []shotSpec
@@ -703,17 +747,28 @@ func (g *Game) shootSpecter() {
 		shots = []shotSpec{{0, 0}, {-14, 0.9}, {14, -0.9}, {-28, 1.8}, {28, -1.8}, {-40, 2.5}, {40, -2.5}, {-52, 3.1}, {52, -3.1}}
 	}
 
+	sweep := 0.0
+	if g.powerLevel >= 4 {
+		sweep = 0.55 * math.Sin(float64(g.tick)*0.045)
+	}
+
 	for _, s := range shots {
-		g.addBullet(cx+s.off, cy, s.dx, 16.5, 5, 26, 0, col)
+		dx := s.dx + sweep*s.off/40.0
+		if g.powerLevel >= 5 && (s.off <= -40 || s.off >= 40) {
+			g.addWaveBullet(cx+s.off, cy, dx, 16.5, 5, 28, 1, 0, col, 1.9)
+		} else {
+			g.addBullet(cx+s.off, cy, dx, 16.5, 5, 26, 0, col)
+		}
 	}
 }
 
 func (g *Game) shootStorm() {
 	cx := g.playerX + playerWidth/2
-	cy := g.playerY + 18
+	cy := g.playerY + playerHeight*0.15
 	col := color.RGBA{120, 255, 230, 255}
 
 	var shots []shotSpec
+	waveAmt := 3.0
 	switch g.powerLevel {
 	case 0:
 		shots = []shotSpec{{0, 0}}
@@ -723,14 +778,27 @@ func (g *Game) shootStorm() {
 		shots = []shotSpec{{0, 0}, {-16, -0.8}, {16, 0.8}}
 	case 3:
 		shots = []shotSpec{{-10, 0}, {10, 0}, {-26, -1.4}, {26, 1.4}}
+		waveAmt = 3.4
 	case 4:
 		shots = []shotSpec{{0, 0}, {-16, -0.8}, {16, 0.8}, {-32, -1.8}, {32, 1.8}}
+		waveAmt = 3.8
 	default:
 		shots = []shotSpec{{0, 0}, {-14, -0.6}, {14, 0.6}, {-28, -1.4}, {28, 1.4}, {-40, -2.2}, {40, 2.2}}
+		waveAmt = 4.2
 	}
 
 	for _, s := range shots {
-		g.addWaveBullet(cx+s.off, cy, s.dx, 14.5, 7, 22, 1, 2, col, 3.0)
+		g.addWaveBullet(cx+s.off, cy, s.dx, 14.5, 7, 22, 1, 2, col, waveAmt)
+	}
+
+	if g.powerLevel >= 4 {
+		orbCol := color.RGBA{90, 240, 255, 255}
+		g.addWaveBullet(cx-34, cy+6, -0.8, 7.5, 18, 18, 1, 6, orbCol, 5.5)
+		g.addWaveBullet(cx+34, cy+6, 0.8, 7.5, 18, 18, 1, 6, orbCol, 5.5)
+	}
+
+	if g.powerLevel >= 5 {
+		g.addWaveBullet(cx, cy+12, 0, 6.5, 30, 30, 2, 6, color.RGBA{140, 255, 245, 255}, 6.5)
 	}
 }
 
@@ -752,9 +820,28 @@ func (g *Game) addWaveBullet(x, y, dx, speedY, w, h float64, damage, style int, 
 	last.phase = rand.Float64() * math.Pi * 2
 }
 
+func (g *Game) addBulletAdvanced(x, y, dx, speedY, w, h float64, damage, style int, col color.RGBA, pierce int, homing float64) {
+	g.addBulletDamage(x, y, dx, speedY, w, h, damage, style, col)
+	last := &g.bullets[len(g.bullets)-1]
+	last.pierce = pierce
+	last.homing = homing
+}
+
 func (g *Game) updateBullets() {
 	alive := g.bullets[:0]
 	for _, b := range g.bullets {
+		if b.homing > 0 {
+			if tx, _, ok := g.nearestTarget(b.x, b.y); ok {
+				desired := (tx - b.x) * 0.02
+				if desired > b.homing {
+					desired = b.homing
+				}
+				if desired < -b.homing {
+					desired = -b.homing
+				}
+				b.dx = b.dx*0.9 + desired*0.1
+			}
+		}
 		b.y -= b.speedY
 		if b.wave != 0 {
 			b.x += math.Sin(float64(g.tick)*0.22+b.phase) * b.wave
@@ -765,6 +852,35 @@ func (g *Game) updateBullets() {
 		}
 	}
 	g.bullets = alive
+}
+
+func (g *Game) nearestTarget(x, y float64) (float64, float64, bool) {
+	best := math.MaxFloat64
+	var tx, ty float64
+	found := false
+	for _, e := range g.enemies {
+		if e.hp <= 0 {
+			continue
+		}
+		cx := e.x + e.size/2
+		cy := e.y + e.size/2
+		d := (cx-x)*(cx-x) + (cy-y)*(cy-y)
+		if d < best {
+			best = d
+			tx, ty = cx, cy
+			found = true
+		}
+	}
+	if b := g.boss; b != nil && !b.entering {
+		cx := b.x + b.w/2
+		cy := b.y + b.h/2
+		d := (cx-x)*(cx-x) + (cy-y)*(cy-y)
+		if d < best {
+			tx, ty = cx, cy
+			found = true
+		}
+	}
+	return tx, ty, found
 }
 
 func (g *Game) spawnEnemies() {
@@ -957,6 +1073,8 @@ func (g *Game) resolveBulletHits() {
 	survivingBullets := g.bullets[:0]
 	for _, b := range g.bullets {
 		hit := false
+		consumed := false
+		pierceLeft := b.pierce
 		for i := range g.enemies {
 			e := &g.enemies[i]
 			if e.hp <= 0 || !bulletHitsEnemy(b, *e) {
@@ -969,18 +1087,26 @@ func (g *Game) resolveBulletHits() {
 			} else {
 				g.addExplosion(b.x, b.y, 14, 8, 255, 240, 160)
 			}
+			if pierceLeft > 0 {
+				pierceLeft--
+				continue
+			}
+			consumed = true
 			break
 		}
+		b.pierce = pierceLeft
 		if !hit && g.boss != nil && !g.boss.entering && bulletHitsBoss(b, g.boss) {
 			g.boss.hp -= b.damage
 			g.boss.hitFlash = 3
 			hit = true
+			consumed = true
+			b.pierce = 0
 			g.addExplosion(b.x, b.y, 12, 6, 255, 200, 120)
 			if g.boss.hp <= 0 {
 				g.defeatBoss()
 			}
 		}
-		if !hit {
+		if !consumed {
 			survivingBullets = append(survivingBullets, b)
 		}
 	}
@@ -1179,7 +1305,7 @@ func (g *Game) updateBoss() {
 		}
 		g.powerUps = append(g.powerUps, PowerUp{
 			x:    b.x + b.w/2 - 12 + (rand.Float64()*2-1)*120,
-			y:    b.y + b.h*0.5,
+			y:    b.y + b.h*0.5 - 12,
 			kind: kind,
 		})
 		b.healTimer = 420 + rand.Intn(140)
@@ -1396,7 +1522,11 @@ func (g *Game) updatePowerUps() {
 		if p.y > screenHeight+30 {
 			continue
 		}
-		if rectsOverlap(p.x, p.y, 24, 24, g.playerX, g.playerY, playerWidth, playerHeight) {
+		hitSize := 24.0
+		if p.kind == powerHeal {
+			hitSize = 42.0
+		}
+		if rectsOverlap(p.x+12-hitSize/2, p.y+12-hitSize/2, hitSize, hitSize, g.playerX, g.playerY, playerWidth, playerHeight) {
 			g.applyPowerUp(p.kind)
 			continue
 		}
@@ -1630,6 +1760,23 @@ func (g *Game) drawBullets(screen *ebiten.Image, sx, sy float64) {
 			ebitenutil.DrawRect(screen, x-b.w/2-4, y-b.h/2-4, b.w+8, b.h+8, glow)
 			ebitenutil.DrawRect(screen, x-b.w/2, y-b.h/2, b.w, b.h, b.color)
 			ebitenutil.DrawRect(screen, x-b.w/4, y-b.h/2+6, b.w/2, b.h-12, color.RGBA{255, 245, 220, 255})
+		case 4:
+			ebitenutil.DrawRect(screen, x-b.w/2-4, y-b.h/2, b.w+8, b.h, glow)
+			ebitenutil.DrawRect(screen, x-b.w/2, y-b.h/2, b.w, b.h, b.color)
+			ebitenutil.DrawRect(screen, x-1.5, y-b.h/2-6, 3, b.h+12, color.RGBA{245, 255, 255, 255})
+			ebitenutil.DrawCircle(screen, x, y-b.h/2-6, 3, color.RGBA{245, 255, 255, 255})
+		case 5:
+			ebitenutil.DrawRect(screen, x-b.w/2-3, y-b.h/2-3, b.w+6, b.h+6, glow)
+			ebitenutil.DrawRect(screen, x-b.w/2, y-b.h/2, b.w, b.h, b.color)
+			ebitenutil.DrawRect(screen, x-b.w/2-4, y-2, b.w+8, 4, b.color)
+			ebitenutil.DrawRect(screen, x-2, y-b.h/2-4, 4, b.h+8, b.color)
+			ebitenutil.DrawCircle(screen, x, y, 2.5, color.RGBA{255, 250, 220, 255})
+		case 6:
+			pulse := 3 * math.Sin(float64(g.tick)*0.35+b.phase)
+			ebitenutil.DrawCircle(screen, x, y, b.w/2+5+pulse, glow)
+			ebitenutil.DrawCircle(screen, x, y, b.w/2, b.color)
+			ebitenutil.DrawCircle(screen, x, y, b.w/4, color.RGBA{235, 255, 250, 255})
+			ebitenutil.DrawRect(screen, x-b.w/2-3, y-1, b.w+6, 2, glow)
 		default:
 			ebitenutil.DrawRect(screen, x-b.w/2-2, y-b.h/2, b.w+4, b.h, glow)
 			ebitenutil.DrawRect(screen, x-b.w/2, y-b.h/2, b.w, b.h, b.color)
@@ -1663,15 +1810,31 @@ func (g *Game) drawPowerUps(screen *ebiten.Image, sx, sy float64) {
 		default:
 			c = color.RGBA{255, 90, 120, 255}
 		}
-		size := 22 + 4*math.Sin(float64(g.tick)*0.18)
-		offset := (28 - size) / 2
-		ebitenutil.DrawRect(screen, p.x+sx+offset-3, p.y+sy+offset-3, size+6, size+6, color.RGBA{c.R, c.G, c.B, 90})
-		ebitenutil.DrawRect(screen, p.x+sx+offset, p.y+sy+offset, size, size, c)
+
+		cx := p.x + sx + 12
+		cy := p.y + sy + 12
+		box := 24.0
 		if p.kind == powerHeal {
-			ebitenutil.DrawRect(screen, p.x+sx+11, p.y+sy+5, 6, 18, color.White)
-			ebitenutil.DrawRect(screen, p.x+sx+5, p.y+sy+11, 18, 6, color.White)
+			box = 42.0
+		}
+		size := box*0.9 + 3*math.Sin(float64(g.tick)*0.18)
+		glow := color.RGBA{c.R, c.G, c.B, 90}
+		ebitenutil.DrawRect(screen, cx-size/2-5, cy-size/2-5, size+10, size+10, glow)
+
+		if p.kind == powerHeal {
+			ebitenutil.DrawRect(screen, cx-size/2-2, cy-size/2-2, size+4, size+4, color.RGBA{255, 235, 240, 255})
+		}
+
+		ebitenutil.DrawRect(screen, cx-size/2, cy-size/2, size, size, c)
+
+		if p.kind == powerHeal {
+			arm := size * 0.62
+			thick := size * 0.24
+			ebitenutil.DrawRect(screen, cx-arm/2, cy-thick/2, arm, thick, color.White)
+			ebitenutil.DrawRect(screen, cx-thick/2, cy-arm/2, thick, arm, color.White)
 		} else {
-			ebitenutil.DrawRect(screen, p.x+sx+10, p.y+sy+10, 8, 8, color.White)
+			inner := size * 0.3
+			ebitenutil.DrawRect(screen, cx-inner/2, cy-inner/2, inner, inner, color.White)
 		}
 	}
 }
@@ -1918,7 +2081,7 @@ func (g *Game) drawShipCard(screen *ebiten.Image, r Rect, index int, selected bo
 	ebitenutil.DrawRect(screen, r.X, r.Y, r.W, r.H, fill)
 
 	img := g.shipImages[index]
-	const scale = 0.42
+	const scale = 0.48
 	op := &ebiten.DrawImageOptions{}
 	op.GeoM.Scale(scale, scale)
 	w := float64(img.Bounds().Dx()) * scale
@@ -1985,6 +2148,12 @@ func (g *Game) Layout(outsideWidth, outsideHeight int) (int, int) {
 
 var playerAlpha [][]bool
 
+func scaleShipImage(src image.Image) image.Image {
+	dst := image.NewRGBA(image.Rect(0, 0, playerWidth, playerHeight))
+	xdraw.CatmullRom.Scale(dst, dst.Bounds(), src, src.Bounds(), xdraw.Over, nil)
+	return dst
+}
+
 func loadPlayerAlpha(img image.Image) {
 	bounds := img.Bounds()
 	width, height := bounds.Dx(), bounds.Dy()
@@ -2008,6 +2177,7 @@ func loadShipImages(path string) []*ebiten.Image {
 	if err != nil {
 		log.Fatal(err)
 	}
+	img = scaleShipImage(img)
 	loadPlayerAlpha(img)
 
 	images := make([]*ebiten.Image, len(ships))
