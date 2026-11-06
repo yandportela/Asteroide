@@ -28,23 +28,23 @@ const (
 	playerHeight = 128
 	playerSpeed  = 8.0
 
-	bulletWidth  = 10
-	bulletHeight = 24
+	playerHitW = 44.0
+	playerHitH = 44.0
 
 	maxLives    = 3
 	maxPower    = 5
 	maxRapid    = 3
-	maxGameTime = 120.0
+	maxGameTime = 150.0
 
 	enemyMinSize = 40.0
 	enemyMaxSize = 78.0
 
-	invulnFrames = 110
-	shieldFrames = 600
+	invulnFrames = 75
+	shieldFrames = 450
 
 	bossTriggerTime = 60.0
 	bossWarnFrames  = 120
-	bossMaxHP       = 500
+	bossMaxHP       = 650
 	bossTargetY     = 130.0
 )
 
@@ -52,6 +52,7 @@ const (
 	powerWeapon = iota
 	powerRapid
 	powerShield
+	powerHeal
 )
 
 type GameState int
@@ -72,14 +73,35 @@ func (r Rect) Contains(x, y int) bool {
 	return fx >= r.X && fx <= r.X+r.W && fy >= r.Y && fy <= r.Y+r.H
 }
 
+type Ship struct {
+	name        string
+	trait       string
+	tint        color.RGBA
+	speedMul    float64
+	lifeBonus   int
+	cooldownMul float64
+}
+
+var ships = []Ship{
+	{name: "INTERCEPTADOR", trait: "+30% velocidade", tint: color.RGBA{90, 180, 255, 255}, speedMul: 1.3, cooldownMul: 1.0},
+	{name: "FORTALEZA", trait: "+1 vida", tint: color.RGBA{90, 255, 140, 255}, speedMul: 0.92, cooldownMul: 1.0, lifeBonus: 1},
+	{name: "CAÇADOR", trait: "+30% cadência", tint: color.RGBA{255, 100, 90, 255}, speedMul: 1.0, cooldownMul: 0.72},
+}
+
 var (
-	menuPlayRect     = Rect{800, 360, 320, 72}
-	menuQuitRect     = Rect{800, 452, 320, 72}
+	menuPlayRect     = Rect{800, 550, 320, 70}
+	menuQuitRect     = Rect{800, 634, 320, 70}
 	pauseResumeRect  = Rect{800, 470, 320, 64}
 	pauseRestartRect = Rect{800, 550, 320, 64}
 	pauseMenuRect    = Rect{800, 630, 320, 64}
 	overAgainRect    = Rect{770, 610, 380, 64}
 	overMenuRect     = Rect{800, 690, 320, 64}
+
+	shipCardRects = []Rect{
+		{530, 340, 260, 160},
+		{830, 340, 260, 160},
+		{1130, 340, 260, 160},
+	}
 )
 
 type Bullet struct {
@@ -87,15 +109,19 @@ type Bullet struct {
 	speedY float64
 	dx     float64
 	damage int
+	w, h   float64
+	style  int
+	color  color.RGBA
 }
 
 type Enemy struct {
-	x, y   float64
-	size   float64
-	speedY float64
-	driftX float64
-	hp     int
-	kind   int
+	x, y       float64
+	size       float64
+	speedY     float64
+	driftX     float64
+	hp         int
+	kind       int
+	shootTimer int
 }
 
 type Boss struct {
@@ -104,6 +130,7 @@ type Boss struct {
 	hp, maxHP int
 	vx        float64
 	fireTimer int
+	healTimer int
 	volley    int
 	hitFlash  int
 	entering  bool
@@ -138,7 +165,9 @@ type Star struct {
 type Game struct {
 	playerX float64
 	playerY float64
-	player  *ebiten.Image
+
+	shipImages   []*ebiten.Image
+	selectedShip int
 
 	enemies      []Enemy
 	bullets      []Bullet
@@ -155,6 +184,7 @@ type Game struct {
 	bestScore       int
 	destroyed       int
 	lives           int
+	livesMax        int
 	powerLevel      int
 	rapidLevel      int
 	shieldTimer     int
@@ -211,13 +241,16 @@ func init() {
 }
 
 func newGame() *Game {
-	g := &Game{player: loadImage("player.png")}
+	g := &Game{shipImages: loadShipImages("player.png")}
 	g.resetState()
 	g.state = stateMenu
 	return g
 }
 
 func (g *Game) resetState() {
+	ship := ships[g.selectedShip]
+	g.livesMax = maxLives + ship.lifeBonus
+
 	g.playerX = screenWidth/2 - playerWidth/2
 	g.playerY = screenHeight - playerHeight - 20
 	g.enemies = nil
@@ -232,7 +265,7 @@ func (g *Game) resetState() {
 	g.frameCount = 0
 	g.score = 0
 	g.destroyed = 0
-	g.lives = maxLives
+	g.lives = g.livesMax
 	g.powerLevel = 0
 	g.rapidLevel = 0
 	g.shieldTimer = 0
@@ -310,6 +343,24 @@ func (g *Game) Update() error {
 }
 
 func (g *Game) updateMenu() error {
+	for i, r := range shipCardRects {
+		if g.clicked(r) {
+			g.selectedShip = i
+		}
+	}
+	if inpututil.IsKeyJustPressed(ebiten.KeyArrowLeft) || inpututil.IsKeyJustPressed(ebiten.KeyA) {
+		g.selectedShip = (g.selectedShip + len(ships) - 1) % len(ships)
+	}
+	if inpututil.IsKeyJustPressed(ebiten.KeyArrowRight) || inpututil.IsKeyJustPressed(ebiten.KeyD) {
+		g.selectedShip = (g.selectedShip + 1) % len(ships)
+	}
+	numberKeys := []ebiten.Key{ebiten.Key1, ebiten.Key2, ebiten.Key3}
+	for i, k := range numberKeys {
+		if i < len(ships) && inpututil.IsKeyJustPressed(k) {
+			g.selectedShip = i
+		}
+	}
+
 	if inpututil.IsKeyJustPressed(ebiten.KeyEnter) ||
 		inpututil.IsKeyJustPressed(ebiten.KeySpace) ||
 		g.clicked(menuPlayRect) {
@@ -431,8 +482,9 @@ func (g *Game) movePlayer() {
 	}
 	if mx != 0 || my != 0 {
 		length := math.Hypot(mx, my)
-		g.playerX += mx / length * playerSpeed
-		g.playerY += my / length * playerSpeed
+		speed := playerSpeed * ships[g.selectedShip].speedMul
+		g.playerX += mx / length * speed
+		g.playerY += my / length * speed
 	}
 	if g.playerX < 0 {
 		g.playerX = 0
@@ -448,47 +500,126 @@ func (g *Game) movePlayer() {
 	}
 }
 
+type shotSpec struct {
+	off float64
+	dx  float64
+}
+
 func (g *Game) handleShooting() {
 	if !ebiten.IsKeyPressed(ebiten.KeySpace) || g.fireCooldown > 0 {
 		return
 	}
 
-	cx := g.playerX + playerWidth/2 - bulletWidth/2
-	cy := g.playerY + 18
-	speed := 13.0
-
-	switch g.powerLevel {
+	switch g.selectedShip {
 	case 0:
-		g.addBullet(cx, cy, 0, speed)
+		g.shootInterceptor()
 	case 1:
-		g.addBullet(cx-12, cy, 0, speed)
-		g.addBullet(cx+12, cy, 0, speed)
-	case 2:
-		g.addBullet(cx, cy, 0, speed)
-		g.addBullet(cx-20, cy+6, -1.7, speed)
-		g.addBullet(cx+20, cy+6, 1.7, speed)
-	case 3:
-		g.addBullet(cx-8, cy, 0, speed)
-		g.addBullet(cx+8, cy, 0, speed)
-		g.addBullet(cx-28, cy+8, -2.6, speed*0.97)
-		g.addBullet(cx+28, cy+8, 2.6, speed*0.97)
+		g.shootFortress()
 	default:
-		g.addBullet(cx, cy-6, 0, speed+1)
-		g.addBullet(cx-16, cy, -1.2, speed)
-		g.addBullet(cx+16, cy, 1.2, speed)
-		g.addBullet(cx-32, cy+8, -3.0, speed*0.95)
-		g.addBullet(cx+32, cy+8, 3.0, speed*0.95)
+		g.shootHunter()
 	}
 
 	cooldown := 12 - g.rapidLevel*2
 	if cooldown < 6 {
 		cooldown = 6
 	}
+	cooldown = int(float64(cooldown) * ships[g.selectedShip].cooldownMul)
+	if cooldown < 4 {
+		cooldown = 4
+	}
 	g.fireCooldown = cooldown
 }
 
-func (g *Game) addBullet(x, y, dx, speedY float64) {
-	g.bullets = append(g.bullets, Bullet{x: x, y: y, dx: dx, speedY: speedY, damage: 1})
+func (g *Game) shootInterceptor() {
+	cx := g.playerX + playerWidth/2
+	cy := g.playerY + 18
+	col := color.RGBA{90, 210, 255, 255}
+
+	var shots []shotSpec
+	switch g.powerLevel {
+	case 0:
+		shots = []shotSpec{{0, 0}}
+	case 1:
+		shots = []shotSpec{{-10, 0}, {10, 0}}
+	case 2:
+		shots = []shotSpec{{0, 0}, {-14, -1.6}, {14, 1.6}}
+	case 3:
+		shots = []shotSpec{{-9, 0}, {9, 0}, {-22, -2.6}, {22, 2.6}}
+	case 4:
+		shots = []shotSpec{{0, 0}, {-9, 0}, {9, 0}, {-24, -2.4}, {24, 2.4}}
+	default:
+		shots = []shotSpec{{0, 0}, {-14, -1.5}, {14, 1.5}, {-28, -3.2}, {28, 3.2}, {-42, -5.0}, {42, 5.0}}
+	}
+
+	for _, s := range shots {
+		g.addBullet(cx+s.off, cy, s.dx, 17.0, 6, 30, 0, col)
+	}
+}
+
+func (g *Game) shootFortress() {
+	cx := g.playerX + playerWidth/2
+	cy := g.playerY + 18
+	col := color.RGBA{110, 255, 140, 255}
+
+	count := 3
+	spread := 1.8
+	speed := 10.0
+	size := 16.0
+	switch g.powerLevel {
+	case 1:
+		count, spread = 5, 1.3
+	case 2:
+		count, spread, speed = 5, 1.9, 10.5
+	case 3:
+		count, spread, speed, size = 7, 1.4, 10.5, 15
+	case 4:
+		count, spread, speed = 7, 1.9, 11.0
+	case 5:
+		count, spread, speed, size = 9, 1.6, 11.0, 14
+	}
+
+	for i := 0; i < count; i++ {
+		t := float64(i) - float64(count-1)/2
+		g.addBullet(cx+t*6, cy, t*spread, speed, size, size, 1, col)
+	}
+
+	if g.powerLevel >= 5 {
+		g.addBullet(cx-7, cy+6, 0, 8.5, 26, 26, 1, color.RGBA{60, 220, 110, 255})
+		g.addBullet(cx+7, cy+6, 0, 8.5, 26, 26, 1, color.RGBA{60, 220, 110, 255})
+	}
+}
+
+func (g *Game) shootHunter() {
+	cx := g.playerX + playerWidth/2
+	cy := g.playerY + 18
+	col := color.RGBA{255, 120, 80, 255}
+
+	var shots []shotSpec
+	switch g.powerLevel {
+	case 0:
+		shots = []shotSpec{{-9, 0}, {9, 0}}
+	case 1:
+		shots = []shotSpec{{0, 0}, {-12, 0}, {12, 0}}
+	case 2:
+		shots = []shotSpec{{-8, 0}, {8, 0}, {-20, -2.4}, {20, 2.4}}
+	case 3:
+		shots = []shotSpec{{-8, -0.8}, {8, 0.8}, {0, 0}, {-22, -2.8}, {22, 2.8}}
+	case 4:
+		shots = []shotSpec{{-8, 0}, {8, 0}, {-20, -1.8}, {20, 1.8}, {0, 0}, {-32, -3.4}, {32, 3.4}}
+	default:
+		shots = []shotSpec{{-8, 0}, {8, 0}, {-20, -1.6}, {20, 1.6}, {-32, -3.2}, {32, 3.2}, {0, 0}, {-44, -5.0}, {44, 5.0}}
+	}
+
+	for _, s := range shots {
+		g.addBullet(cx+s.off, cy, s.dx, 15.5, 8, 20, 2, col)
+	}
+}
+
+func (g *Game) addBullet(x, y, dx, speedY, w, h float64, style int, col color.RGBA) {
+	g.bullets = append(g.bullets, Bullet{
+		x: x, y: y, dx: dx, speedY: speedY, damage: 1,
+		w: w, h: h, style: style, color: col,
+	})
 }
 
 func (g *Game) updateBullets() {
@@ -496,7 +627,7 @@ func (g *Game) updateBullets() {
 	for _, b := range g.bullets {
 		b.y -= b.speedY
 		b.x += b.dx
-		if b.y > -bulletHeight-10 && b.x > -40 && b.x < screenWidth+40 {
+		if b.y > -80 && b.x > -80 && b.x < screenWidth+80 {
 			alive = append(alive, b)
 		}
 	}
@@ -505,12 +636,35 @@ func (g *Game) updateBullets() {
 
 func (g *Game) spawnEnemies() {
 	g.frameCount++
-	if g.bossWarn > 0 || g.boss != nil {
+	if g.bossWarn > 0 {
 		return
 	}
-	interval := int(52 - g.gameTime*0.28)
-	if interval < 12 {
-		interval = 12
+	if g.boss != nil {
+		if g.boss.entering {
+			return
+		}
+		hpFrac := float64(g.boss.hp) / float64(g.boss.maxHP)
+		interval := 58 - int((1-hpFrac)*24)
+		if interval < 34 {
+			interval = 34
+		}
+		if g.frameCount%interval == 0 {
+			size := 30.0 + rand.Float64()*8
+			g.enemies = append(g.enemies, Enemy{
+				x:      rand.Float64() * (screenWidth - size),
+				y:      -size,
+				size:   size,
+				speedY: 2.8 + rand.Float64()*1.6,
+				driftX: (rand.Float64()*2 - 1) * 1.8,
+				hp:     1,
+				kind:   0,
+			})
+		}
+		return
+	}
+	interval := int(46 - g.gameTime*0.30)
+	if interval < 9 {
+		interval = 9
 	}
 	if g.frameCount%interval != 0 {
 		return
@@ -520,31 +674,39 @@ func (g *Game) spawnEnemies() {
 	var hp, kind int
 	r := rand.Float64()
 	switch {
-	case r < 0.62:
+	case r < 0.55:
 		size = enemyMinSize
 		hp = 1
 		kind = 0
-	case r < 0.9:
+	case r < 0.85:
 		size = 58
 		hp = 2
 		kind = 1
 	default:
 		size = enemyMaxSize
-		hp = 4
+		hp = 5
 		kind = 2
 	}
 
-	speed := 1.4 + rand.Float64()*1.6 + g.gameTime*0.012
-	drift := (rand.Float64()*2 - 1) * (0.6 + g.gameTime*0.004)
+	speed := 1.9 + rand.Float64()*1.7 + g.gameTime*0.016
+	drift := (rand.Float64()*2 - 1) * (0.8 + g.gameTime*0.005)
+
+	shootTimer := 0
+	if kind == 1 {
+		shootTimer = 100 + rand.Intn(70)
+	} else if kind == 2 {
+		shootTimer = 80 + rand.Intn(60)
+	}
 
 	g.enemies = append(g.enemies, Enemy{
-		x:      rand.Float64() * (screenWidth - size),
-		y:      -size,
-		size:   size,
-		speedY: speed - float64(kind)*0.15,
-		driftX: drift,
-		hp:     hp,
-		kind:   kind,
+		x:          rand.Float64() * (screenWidth - size),
+		y:          -size,
+		size:       size,
+		speedY:     speed - float64(kind)*0.1,
+		driftX:     drift,
+		hp:         hp,
+		kind:       kind,
+		shootTimer: shootTimer,
 	})
 }
 
@@ -561,11 +723,49 @@ func (g *Game) updateEnemies() {
 			e.x = screenWidth - e.size
 			e.driftX = -e.driftX
 		}
-		if e.y < screenHeight+e.size {
-			alive = append(alive, e)
+		if e.y > screenHeight+e.size {
+			g.combo = 0
+			g.comboTimer = 0
+			continue
 		}
+		if e.kind > 0 && g.gameTime > 12 && e.y > 40 && e.y < screenHeight*0.72 {
+			e.shootTimer--
+			if e.shootTimer <= 0 {
+				g.enemyShoot(e)
+				base := 150 - int(g.gameTime*0.5)
+				if base < 60 {
+					base = 60
+				}
+				e.shootTimer = base + rand.Intn(60)
+			}
+		}
+		alive = append(alive, e)
 	}
 	g.enemies = alive
+}
+
+func (g *Game) enemyShoot(e Enemy) {
+	cx := e.x + e.size/2
+	cy := e.y + e.size*0.7
+	px := g.playerX + playerWidth/2
+	py := g.playerY + playerHeight/2
+	base := math.Atan2(py-cy, px-cx)
+	speed := 4.2 + rand.Float64()*1.2 + g.gameTime*0.006
+
+	if e.kind == 2 {
+		count := 3
+		for i := 0; i < count; i++ {
+			a := base + (float64(i)-float64(count-1)/2)*0.16
+			g.enemyBullets = append(g.enemyBullets, EnemyBullet{
+				x: cx, y: cy, vx: math.Cos(a) * speed, vy: math.Sin(a) * speed, r: 8,
+			})
+		}
+		return
+	}
+
+	g.enemyBullets = append(g.enemyBullets, EnemyBullet{
+		x: cx, y: cy, vx: math.Cos(base) * speed, vy: math.Sin(base) * speed, r: 7,
+	})
 }
 
 func (g *Game) resolveBulletHits() {
@@ -582,7 +782,7 @@ func (g *Game) resolveBulletHits() {
 			if e.hp <= 0 {
 				g.destroyEnemy(*e)
 			} else {
-				g.addExplosion(b.x+bulletWidth/2, b.y, 14, 8, 255, 240, 160)
+				g.addExplosion(b.x, b.y, 14, 8, 255, 240, 160)
 			}
 			break
 		}
@@ -590,7 +790,7 @@ func (g *Game) resolveBulletHits() {
 			g.boss.hp -= b.damage
 			g.boss.hitFlash = 3
 			hit = true
-			g.addExplosion(b.x+bulletWidth/2, b.y, 12, 6, 255, 200, 120)
+			g.addExplosion(b.x, b.y, 12, 6, 255, 200, 120)
 			if g.boss.hp <= 0 {
 				g.defeatBoss()
 			}
@@ -688,6 +888,7 @@ func (g *Game) spawnBoss() {
 		maxHP:     bossMaxHP,
 		vx:        2.5,
 		fireTimer: 80,
+		healTimer: 300,
 		entering:  true,
 	}
 	g.enemyBullets = nil
@@ -732,7 +933,7 @@ func (g *Game) updateBoss() {
 	}
 
 	hpFrac := float64(b.hp) / float64(b.maxHP)
-	speed := 2.0 + (1.0-hpFrac)*3.0
+	speed := 2.4 + (1.0-hpFrac)*3.4
 	if b.vx < 0 {
 		b.vx = -speed
 	} else {
@@ -753,6 +954,20 @@ func (g *Game) updateBoss() {
 	if b.fireTimer <= 0 {
 		g.bossShoot()
 	}
+
+	b.healTimer--
+	if b.healTimer <= 0 {
+		kind := powerHeal
+		if g.lives >= g.livesMax {
+			kind = rand.Intn(3)
+		}
+		g.powerUps = append(g.powerUps, PowerUp{
+			x:    b.x + b.w/2 - 12 + (rand.Float64()*2-1)*120,
+			y:    b.y + b.h*0.5,
+			kind: kind,
+		})
+		b.healTimer = 420 + rand.Intn(140)
+	}
 }
 
 func (g *Game) bossShoot() {
@@ -764,25 +979,29 @@ func (g *Game) bossShoot() {
 	cy := b.y + b.h*0.75
 	hpFrac := float64(b.hp) / float64(b.maxHP)
 
-	speed := 5.0
+	speed := 5.8
 	count := 3
-	spread := 0.16
+	spread := 0.14
 	if hpFrac < 0.7 {
-		speed = 5.5
-		count = 5
+		speed = 6.4
+		count = 6
 	}
 	if hpFrac < 0.35 {
-		speed = 6.0
-		count = 7
+		speed = 7.0
+		count = 8
 	}
 
 	b.volley++
-	if b.volley%3 == 0 {
-		n := 14
+	radialEvery := 3
+	if hpFrac < 0.5 {
+		radialEvery = 2
+	}
+	if b.volley%radialEvery == 0 {
+		n := 18
 		for i := 0; i < n; i++ {
 			a := float64(i)/float64(n)*2*math.Pi + rand.Float64()*0.08
 			g.enemyBullets = append(g.enemyBullets, EnemyBullet{
-				x: cx, y: cy, vx: math.Cos(a) * speed * 0.9, vy: math.Sin(a) * speed * 0.9, r: 9,
+				x: cx, y: cy, vx: math.Cos(a) * speed * 0.95, vy: math.Sin(a) * speed * 0.95, r: 9,
 			})
 		}
 	} else {
@@ -798,14 +1017,14 @@ func (g *Game) bossShoot() {
 		}
 	}
 
-	b.fireTimer = 80
+	b.fireTimer = 62
 	if hpFrac < 0.7 {
-		b.fireTimer = 60
+		b.fireTimer = 46
 	}
 	if hpFrac < 0.35 {
-		b.fireTimer = 42
+		b.fireTimer = 32
 	}
-	b.fireTimer += rand.Intn(15)
+	b.fireTimer += rand.Intn(12)
 }
 
 func (g *Game) updateEnemyBullets() {
@@ -886,11 +1105,19 @@ func (g *Game) destroyEnemy(e Enemy) {
 	g.addExplosion(e.x+e.size/2, e.y+e.size/2, e.size*0.9, 22, 255, 170, 40)
 	g.shake = maxInt(g.shake, 3+int(e.size/20))
 
-	if rand.Intn(100) < 14 {
+	dropChance := 11
+	if g.boss != nil {
+		dropChance = 30
+	}
+	if rand.Intn(100) < dropChance {
+		kind := rand.Intn(3)
+		if g.boss != nil && rand.Intn(100) < 55 {
+			kind = powerHeal
+		}
 		g.powerUps = append(g.powerUps, PowerUp{
 			x:    e.x + e.size/2 - 12,
 			y:    e.y + e.size/2 - 12,
-			kind: rand.Intn(3),
+			kind: kind,
 		})
 	}
 }
@@ -944,6 +1171,12 @@ func (g *Game) applyPowerUp(kind int) {
 		}
 	case powerShield:
 		g.shieldTimer = shieldFrames
+	case powerHeal:
+		if g.lives < g.livesMax {
+			g.lives++
+		} else {
+			g.score += 200
+		}
 	}
 	g.addExplosion(g.playerX+playerWidth/2, g.playerY+playerHeight/2, 40, 14, 120, 255, 200)
 }
@@ -1037,7 +1270,7 @@ func (g *Game) drawPlayer(screen *ebiten.Image, sx, sy float64) {
 	if g.invulnTimer > 0 && (g.invulnTimer/6)%2 == 0 {
 		op.ColorScale.ScaleAlpha(0.35)
 	}
-	screen.DrawImage(g.player, op)
+	screen.DrawImage(g.shipImages[g.selectedShip], op)
 }
 
 func (g *Game) drawBoss(screen *ebiten.Image, sx, sy float64) {
@@ -1101,9 +1334,22 @@ func (g *Game) drawEnemies(screen *ebiten.Image, sx, sy float64) {
 
 func (g *Game) drawBullets(screen *ebiten.Image, sx, sy float64) {
 	for _, b := range g.bullets {
-		ebitenutil.DrawRect(screen, b.x+sx-2, b.y+sy, bulletWidth+4, bulletHeight, color.RGBA{40, 120, 255, 80})
-		ebitenutil.DrawRect(screen, b.x+sx, b.y+sy, bulletWidth, bulletHeight, color.RGBA{120, 230, 255, 255})
-		ebitenutil.DrawRect(screen, b.x+sx+2, b.y+sy+4, bulletWidth-4, bulletHeight-8, color.White)
+		x, y := b.x+sx, b.y+sy
+		glow := color.RGBA{b.color.R, b.color.G, b.color.B, 80}
+		switch b.style {
+		case 0:
+			ebitenutil.DrawRect(screen, x-b.w/2-3, y-b.h/2, b.w+6, b.h, glow)
+			ebitenutil.DrawRect(screen, x-b.w/2, y-b.h/2, b.w, b.h, b.color)
+			ebitenutil.DrawRect(screen, x-1, y-b.h/2+5, 2, b.h-10, color.RGBA{235, 250, 255, 255})
+		case 1:
+			ebitenutil.DrawCircle(screen, x, y, b.w/2+4, glow)
+			ebitenutil.DrawCircle(screen, x, y, b.w/2, b.color)
+			ebitenutil.DrawCircle(screen, x-b.w/6, y-b.h/6, b.w/5, color.RGBA{235, 255, 240, 255})
+		default:
+			ebitenutil.DrawRect(screen, x-b.w/2-2, y-b.h/2, b.w+4, b.h, glow)
+			ebitenutil.DrawRect(screen, x-b.w/2, y-b.h/2, b.w, b.h, b.color)
+			ebitenutil.DrawRect(screen, x-1, y-b.h/2+4, 2, b.h-8, color.RGBA{255, 240, 210, 255})
+		}
 	}
 }
 
@@ -1127,14 +1373,21 @@ func (g *Game) drawPowerUps(screen *ebiten.Image, sx, sy float64) {
 			c = color.RGBA{80, 255, 130, 255}
 		case powerRapid:
 			c = color.RGBA{255, 220, 70, 255}
-		default:
+		case powerShield:
 			c = color.RGBA{90, 220, 255, 255}
+		default:
+			c = color.RGBA{255, 90, 120, 255}
 		}
 		size := 22 + 4*math.Sin(float64(g.tick)*0.18)
 		offset := (28 - size) / 2
 		ebitenutil.DrawRect(screen, p.x+sx+offset-3, p.y+sy+offset-3, size+6, size+6, color.RGBA{c.R, c.G, c.B, 90})
 		ebitenutil.DrawRect(screen, p.x+sx+offset, p.y+sy+offset, size, size, c)
-		ebitenutil.DrawRect(screen, p.x+sx+10, p.y+sy+10, 8, 8, color.White)
+		if p.kind == powerHeal {
+			ebitenutil.DrawRect(screen, p.x+sx+11, p.y+sy+5, 6, 18, color.White)
+			ebitenutil.DrawRect(screen, p.x+sx+5, p.y+sy+11, 18, 6, color.White)
+		} else {
+			ebitenutil.DrawRect(screen, p.x+sx+10, p.y+sy+10, 8, 8, color.White)
+		}
 	}
 }
 
@@ -1306,38 +1559,80 @@ func (g *Game) drawMenu(screen *ebiten.Image) {
 
 	title := "ASTEROIDE"
 	tw := font.MeasureString(titleFont, title).Round()
-	text.Draw(screen, title, titleFont, cx-tw/2+4, 234, color.RGBA{20, 60, 120, 255})
-	text.Draw(screen, title, titleFont, cx-tw/2, 230, color.RGBA{90, 180, 255, 255})
+	text.Draw(screen, title, titleFont, cx-tw/2+4, 204, color.RGBA{20, 60, 120, 255})
+	text.Draw(screen, title, titleFont, cx-tw/2, 200, color.RGBA{90, 180, 255, 255})
 
 	sub := "UM SHOOT 'EM UP ESPACIAL"
 	sw := font.MeasureString(mediumFont, sub).Round()
-	text.Draw(screen, sub, mediumFont, cx-sw/2, 290, color.RGBA{120, 150, 200, 255})
+	text.Draw(screen, sub, mediumFont, cx-sw/2, 255, color.RGBA{120, 150, 200, 255})
+
+	section := "ESCOLHA SUA NAVE"
+	secW := font.MeasureString(mediumFont, section).Round()
+	text.Draw(screen, section, mediumFont, cx-secW/2, 320, color.RGBA{170, 195, 235, 255})
+
+	for i := range ships {
+		g.drawShipCard(screen, shipCardRects[i], i, i == g.selectedShip)
+	}
+
+	hint := "SETAS / 1-2-3 para escolher a nave"
+	hw := font.MeasureString(smallFont, hint).Round()
+	text.Draw(screen, hint, smallFont, cx-hw/2, 525, color.RGBA{140, 165, 205, 255})
 
 	drawButton(screen, menuPlayRect, "JOGAR", true)
 	drawButton(screen, menuQuitRect, "SAIR", false)
 
-	hint := "ENTER / ESPAÇO para jogar   -   clique nos botões"
-	hw := font.MeasureString(smallFont, hint).Round()
-	text.Draw(screen, hint, smallFont, cx-hw/2, 570, color.RGBA{140, 165, 205, 255})
-
 	rec := fmt.Sprintf("RECORDE  %d", g.bestScore)
 	rw := font.MeasureString(mediumFont, rec).Round()
-	text.Draw(screen, rec, mediumFont, cx-rw/2, 640, color.RGBA{255, 220, 100, 255})
+	text.Draw(screen, rec, mediumFont, cx-rw/2, 745, color.RGBA{255, 220, 100, 255})
 
-	card := Rect{580, 680, 760, 300}
+	card := Rect{510, 770, 900, 290}
 	drawPanel(screen, card, color.RGBA{8, 12, 26, 220}, color.RGBA{60, 95, 160, 200})
 
 	title2 := "COMO JOGAR"
 	t2w := font.MeasureString(mediumFont, title2).Round()
-	text.Draw(screen, title2, mediumFont, cx-t2w/2, 724, color.White)
+	text.Draw(screen, title2, mediumFont, cx-t2w/2, 810, color.White)
 
-	text.Draw(screen, "WASD / SETAS   Mover a nave", smallFont, 650, 772, color.RGBA{170, 195, 235, 255})
-	text.Draw(screen, "ESPAÇO         Atirar", smallFont, 650, 810, color.RGBA{170, 195, 235, 255})
-	text.Draw(screen, "P / ESC        Pausar", smallFont, 650, 848, color.RGBA{170, 195, 235, 255})
+	text.Draw(screen, "WASD / SETAS   Mover a nave", smallFont, 570, 848, color.RGBA{170, 195, 235, 255})
+	text.Draw(screen, "ESPAÇO         Atirar", smallFont, 570, 884, color.RGBA{170, 195, 235, 255})
+	text.Draw(screen, "P / ESC        Pausar", smallFont, 570, 920, color.RGBA{170, 195, 235, 255})
+	text.Draw(screen, "1 / 2 / 3      Trocar de nave", smallFont, 570, 956, color.RGBA{170, 195, 235, 255})
 
-	drawLegend(screen, 650, 892, color.RGBA{80, 255, 130, 255}, "Arma")
-	drawLegend(screen, 900, 892, color.RGBA{255, 220, 70, 255}, "Cadência")
-	drawLegend(screen, 1150, 892, color.RGBA{90, 220, 255, 255}, "Escudo")
+	drawLegend(screen, 570, 995, color.RGBA{80, 255, 130, 255}, "Arma")
+	drawLegend(screen, 790, 995, color.RGBA{255, 220, 70, 255}, "Cadência")
+	drawLegend(screen, 1010, 995, color.RGBA{90, 220, 255, 255}, "Escudo")
+	drawLegend(screen, 1230, 995, color.RGBA{255, 90, 120, 255}, "Cura")
+}
+
+func (g *Game) drawShipCard(screen *ebiten.Image, r Rect, index int, selected bool) {
+	mx, my := ebiten.CursorPosition()
+	hover := r.Contains(mx, my)
+
+	fill := color.RGBA{10, 16, 30, 225}
+	border := color.RGBA{50, 70, 110, 220}
+	if hover {
+		fill = color.RGBA{18, 28, 50, 240}
+	}
+	if selected {
+		fill = color.RGBA{22, 38, 68, 245}
+		border = ships[index].tint
+	}
+
+	ebitenutil.DrawRect(screen, r.X-3, r.Y-3, r.W+6, r.H+6, border)
+	ebitenutil.DrawRect(screen, r.X, r.Y, r.W, r.H, fill)
+
+	img := g.shipImages[index]
+	const scale = 0.5
+	op := &ebiten.DrawImageOptions{}
+	op.GeoM.Scale(scale, scale)
+	w := float64(img.Bounds().Dx()) * scale
+	op.GeoM.Translate(r.X+(r.W-w)/2, r.Y+14)
+	screen.DrawImage(img, op)
+
+	nw := font.MeasureString(smallFont, ships[index].name).Round()
+	text.Draw(screen, ships[index].name, smallFont, int(r.X+r.W/2)-nw/2, int(r.Y)+112, color.White)
+
+	tw := font.MeasureString(smallFont, ships[index].trait).Round()
+	text.Draw(screen, ships[index].trait, smallFont, int(r.X+r.W/2)-tw/2, int(r.Y)+142, ships[index].tint)
 }
 
 func (g *Game) drawPause(screen *ebiten.Image) {
@@ -1406,19 +1701,47 @@ func loadPlayerAlpha(img image.Image) {
 	}
 }
 
-func loadImage(path string) *ebiten.Image {
+func loadShipImages(path string) []*ebiten.Image {
 	file, err := os.Open(path)
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer file.Close()
-
 	img, err := png.Decode(file)
+	file.Close()
 	if err != nil {
 		log.Fatal(err)
 	}
 	loadPlayerAlpha(img)
-	return ebiten.NewImageFromImage(img)
+
+	images := make([]*ebiten.Image, len(ships))
+	for i, s := range ships {
+		images[i] = ebiten.NewImageFromImage(recolorShip(img, s.tint))
+	}
+	return images
+}
+
+func recolorShip(src image.Image, tint color.RGBA) image.Image {
+	b := src.Bounds()
+	dst := image.NewRGBA(image.Rect(0, 0, b.Dx(), b.Dy()))
+	tr, tg, tb := float64(tint.R), float64(tint.G), float64(tint.B)
+
+	for y := 0; y < b.Dy(); y++ {
+		for x := 0; x < b.Dx(); x++ {
+			r, g, bl, a := src.At(b.Min.X+x, b.Min.Y+y).RGBA()
+			if a == 0 {
+				continue
+			}
+			lum := (0.299*float64(r) + 0.587*float64(g) + 0.114*float64(bl)) / 65535.0
+			shade := (0.42 + 0.58*lum) * float64(a) / 65535.0
+			dst.SetRGBA(x, y, color.RGBA{
+				R: uint8(tr * shade),
+				G: uint8(tg * shade),
+				B: uint8(tb * shade),
+				A: uint8(a >> 8),
+			})
+		}
+	}
+	return dst
 }
 
 func playerHitsEnemy(px, py float64, e Enemy) bool {
@@ -1450,21 +1773,23 @@ func playerHitsEnemy(px, py float64, e Enemy) bool {
 }
 
 func bulletHitsEnemy(b Bullet, e Enemy) bool {
-	return b.x < e.x+e.size &&
-		b.x+bulletWidth > e.x &&
-		b.y < e.y+e.size &&
-		b.y+bulletHeight > e.y
+	return b.x-b.w/2 < e.x+e.size &&
+		b.x+b.w/2 > e.x &&
+		b.y-b.h/2 < e.y+e.size &&
+		b.y+b.h/2 > e.y
 }
 
 func bulletHitsBoss(b Bullet, boss *Boss) bool {
-	return b.x < boss.x+boss.w &&
-		b.x+bulletWidth > boss.x &&
-		b.y < boss.y+boss.h &&
-		b.y+bulletHeight > boss.y
+	return b.x-b.w/2 < boss.x+boss.w &&
+		b.x+b.w/2 > boss.x &&
+		b.y-b.h/2 < boss.y+boss.h &&
+		b.y+b.h/2 > boss.y
 }
 
 func circleHitsPlayer(eb EnemyBullet, px, py float64) bool {
-	return rectsOverlap(eb.x-eb.r, eb.y-eb.r, eb.r*2, eb.r*2, px, py, playerWidth, playerHeight)
+	hx := px + (playerWidth-playerHitW)/2
+	hy := py + (playerHeight-playerHitH)/2
+	return rectsOverlap(eb.x-eb.r, eb.y-eb.r, eb.r*2, eb.r*2, hx, hy, playerHitW, playerHitH)
 }
 
 func rectsOverlap(x1, y1, w1, h1, x2, y2, w2, h2 float64) bool {
