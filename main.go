@@ -41,6 +41,11 @@ const (
 
 	invulnFrames = 110
 	shieldFrames = 600
+
+	bossTriggerTime = 60.0
+	bossWarnFrames  = 120
+	bossMaxHP       = 500
+	bossTargetY     = 130.0
 )
 
 const (
@@ -93,6 +98,23 @@ type Enemy struct {
 	kind   int
 }
 
+type Boss struct {
+	x, y      float64
+	w, h      float64
+	hp, maxHP int
+	vx        float64
+	fireTimer int
+	volley    int
+	hitFlash  int
+	entering  bool
+}
+
+type EnemyBullet struct {
+	x, y   float64
+	vx, vy float64
+	r      float64
+}
+
 type Explosion struct {
 	x, y      float64
 	frame     int
@@ -118,26 +140,31 @@ type Game struct {
 	playerY float64
 	player  *ebiten.Image
 
-	enemies    []Enemy
-	bullets    []Bullet
-	explosions []Explosion
-	powerUps   []PowerUp
-	stars      []Star
+	enemies      []Enemy
+	bullets      []Bullet
+	explosions   []Explosion
+	powerUps     []PowerUp
+	stars        []Star
+	enemyBullets []EnemyBullet
+	boss         *Boss
 
-	state        GameState
-	tick         int
-	frameCount   int
-	score        int
-	bestScore    int
-	destroyed    int
-	lives        int
-	powerLevel   int
-	rapidLevel   int
-	shieldTimer  int
-	invulnTimer  int
-	fireCooldown int
-	combo        int
-	comboTimer   int
+	state           GameState
+	tick            int
+	frameCount      int
+	score           int
+	bestScore       int
+	destroyed       int
+	lives           int
+	powerLevel      int
+	rapidLevel      int
+	shieldTimer     int
+	invulnTimer     int
+	fireCooldown    int
+	combo           int
+	comboTimer      int
+	bossScheduled   bool
+	bossWarn        int
+	bossFightFrames int
 
 	won       bool
 	startTime time.Time
@@ -197,6 +224,11 @@ func (g *Game) resetState() {
 	g.bullets = nil
 	g.explosions = nil
 	g.powerUps = nil
+	g.enemyBullets = nil
+	g.boss = nil
+	g.bossScheduled = false
+	g.bossWarn = 0
+	g.bossFightFrames = 0
 	g.frameCount = 0
 	g.score = 0
 	g.destroyed = 0
@@ -297,11 +329,13 @@ func (g *Game) updatePlaying() error {
 		return nil
 	}
 
-	g.gameTime = time.Since(g.startTime).Seconds()
-	if g.gameTime >= maxGameTime {
-		g.gameTime = maxGameTime
-		g.finishGame(true)
-		return nil
+	if g.boss == nil && g.bossWarn == 0 {
+		g.gameTime = time.Since(g.startTime).Seconds()
+		if g.gameTime >= maxGameTime {
+			g.gameTime = maxGameTime
+			g.finishGame(true)
+			return nil
+		}
 	}
 
 	if g.comboTimer > 0 {
@@ -316,10 +350,17 @@ func (g *Game) updatePlaying() error {
 	g.updateTimers()
 	g.handleShooting()
 	g.updateBullets()
+	g.updateBoss()
+	if g.bossWarn > 0 || g.boss != nil {
+		g.bossFightFrames++
+	}
+	g.updateEnemyBullets()
 	g.spawnEnemies()
 	g.updateEnemies()
 	g.resolveBulletHits()
 	g.resolvePlayerHits()
+	g.resolveBossPlayerHit()
+	g.resolveBossBulletHits()
 	g.updateExplosions()
 	g.updatePowerUps()
 
@@ -464,6 +505,9 @@ func (g *Game) updateBullets() {
 
 func (g *Game) spawnEnemies() {
 	g.frameCount++
+	if g.bossWarn > 0 || g.boss != nil {
+		return
+	}
 	interval := int(52 - g.gameTime*0.28)
 	if interval < 12 {
 		interval = 12
@@ -542,6 +586,15 @@ func (g *Game) resolveBulletHits() {
 			}
 			break
 		}
+		if !hit && g.boss != nil && !g.boss.entering && bulletHitsBoss(b, g.boss) {
+			g.boss.hp -= b.damage
+			g.boss.hitFlash = 3
+			hit = true
+			g.addExplosion(b.x+bulletWidth/2, b.y, 12, 6, 255, 200, 120)
+			if g.boss.hp <= 0 {
+				g.defeatBoss()
+			}
+		}
 		if !hit {
 			survivingBullets = append(survivingBullets, b)
 		}
@@ -576,18 +629,235 @@ func (g *Game) resolvePlayerHits() {
 			continue
 		}
 		g.destroyEnemy(e)
-		g.lives--
-		g.invulnTimer = invulnFrames
-		g.shake = 18
-		g.combo = 0
-		g.comboTimer = 0
-		g.addExplosion(g.playerX+playerWidth/2, g.playerY+playerHeight/2, 90, 26, 255, 80, 60)
-		if g.lives <= 0 {
-			g.lives = 0
-			g.finishGame(false)
-		}
+		g.damagePlayer()
 	}
 	g.enemies = alive
+}
+
+func (g *Game) damagePlayer() {
+	if g.shieldTimer > 0 || g.invulnTimer > 0 {
+		return
+	}
+	g.lives--
+	g.invulnTimer = invulnFrames
+	g.shake = 18
+	g.combo = 0
+	g.comboTimer = 0
+	g.addExplosion(g.playerX+playerWidth/2, g.playerY+playerHeight/2, 90, 26, 255, 80, 60)
+	if g.lives <= 0 {
+		g.lives = 0
+		g.finishGame(false)
+	}
+}
+
+func (g *Game) resolveBossPlayerHit() {
+	b := g.boss
+	if b == nil || b.entering {
+		return
+	}
+	if rectsOverlap(b.x+30, b.y+20, b.w-60, b.h-30, g.playerX, g.playerY, playerWidth, playerHeight) {
+		g.damagePlayer()
+	}
+}
+
+func (g *Game) resolveBossBulletHits() {
+	alive := g.enemyBullets[:0]
+	for _, eb := range g.enemyBullets {
+		if !circleHitsPlayer(eb, g.playerX, g.playerY) {
+			alive = append(alive, eb)
+			continue
+		}
+		if g.shieldTimer > 0 || g.invulnTimer > 0 {
+			g.addExplosion(eb.x, eb.y, 16, 8, 120, 220, 255)
+			continue
+		}
+		g.damagePlayer()
+		g.addExplosion(eb.x, eb.y, 20, 10, 255, 120, 60)
+	}
+	g.enemyBullets = alive
+}
+
+func (g *Game) spawnBoss() {
+	w, h := 300.0, 170.0
+	g.boss = &Boss{
+		x:         screenWidth/2 - w/2,
+		y:         -h,
+		w:         w,
+		h:         h,
+		hp:        bossMaxHP,
+		maxHP:     bossMaxHP,
+		vx:        2.5,
+		fireTimer: 80,
+		entering:  true,
+	}
+	g.enemyBullets = nil
+	g.shake = 12
+}
+
+func (g *Game) updateBoss() {
+	if !g.bossScheduled {
+		if g.gameTime < bossTriggerTime {
+			return
+		}
+		g.bossScheduled = true
+		g.bossWarn = bossWarnFrames
+		g.bossFightFrames = 0
+		g.enemies = nil
+		return
+	}
+
+	if g.bossWarn > 0 {
+		g.bossWarn--
+		if g.bossWarn == 0 {
+			g.spawnBoss()
+		}
+		return
+	}
+
+	b := g.boss
+	if b == nil {
+		return
+	}
+	if b.hitFlash > 0 {
+		b.hitFlash--
+	}
+
+	if b.entering {
+		b.y += 3
+		if b.y >= bossTargetY {
+			b.y = bossTargetY
+			b.entering = false
+		}
+		return
+	}
+
+	hpFrac := float64(b.hp) / float64(b.maxHP)
+	speed := 2.0 + (1.0-hpFrac)*3.0
+	if b.vx < 0 {
+		b.vx = -speed
+	} else {
+		b.vx = speed
+	}
+	b.x += b.vx
+	if b.x < 60 {
+		b.x = 60
+		b.vx = math.Abs(b.vx)
+	}
+	if b.x+b.w > screenWidth-60 {
+		b.x = screenWidth - 60 - b.w
+		b.vx = -math.Abs(b.vx)
+	}
+	b.y = bossTargetY + math.Sin(float64(g.tick)*0.03)*12
+
+	b.fireTimer--
+	if b.fireTimer <= 0 {
+		g.bossShoot()
+	}
+}
+
+func (g *Game) bossShoot() {
+	b := g.boss
+	if b == nil {
+		return
+	}
+	cx := b.x + b.w/2
+	cy := b.y + b.h*0.75
+	hpFrac := float64(b.hp) / float64(b.maxHP)
+
+	speed := 5.0
+	count := 3
+	spread := 0.16
+	if hpFrac < 0.7 {
+		speed = 5.5
+		count = 5
+	}
+	if hpFrac < 0.35 {
+		speed = 6.0
+		count = 7
+	}
+
+	b.volley++
+	if b.volley%3 == 0 {
+		n := 14
+		for i := 0; i < n; i++ {
+			a := float64(i)/float64(n)*2*math.Pi + rand.Float64()*0.08
+			g.enemyBullets = append(g.enemyBullets, EnemyBullet{
+				x: cx, y: cy, vx: math.Cos(a) * speed * 0.9, vy: math.Sin(a) * speed * 0.9, r: 9,
+			})
+		}
+	} else {
+		px := g.playerX + playerWidth/2
+		py := g.playerY + playerHeight/2
+		base := math.Atan2(py-cy, px-cx)
+		for i := 0; i < count; i++ {
+			off := (float64(i) - float64(count-1)/2) * spread
+			a := base + off
+			g.enemyBullets = append(g.enemyBullets, EnemyBullet{
+				x: cx, y: cy, vx: math.Cos(a) * speed, vy: math.Sin(a) * speed, r: 8,
+			})
+		}
+	}
+
+	b.fireTimer = 80
+	if hpFrac < 0.7 {
+		b.fireTimer = 60
+	}
+	if hpFrac < 0.35 {
+		b.fireTimer = 42
+	}
+	b.fireTimer += rand.Intn(15)
+}
+
+func (g *Game) updateEnemyBullets() {
+	alive := g.enemyBullets[:0]
+	for _, eb := range g.enemyBullets {
+		eb.x += eb.vx
+		eb.y += eb.vy
+		if eb.x > -40 && eb.x < screenWidth+40 && eb.y > -40 && eb.y < screenHeight+40 {
+			alive = append(alive, eb)
+		}
+	}
+	g.enemyBullets = alive
+}
+
+func (g *Game) defeatBoss() {
+	b := g.boss
+	if b == nil {
+		return
+	}
+	cx := b.x + b.w/2
+	cy := b.y + b.h/2
+
+	g.score += 1000
+	g.destroyed++
+
+	for i := 0; i < 18; i++ {
+		angle := rand.Float64() * math.Pi * 2
+		dist := rand.Float64() * b.w * 0.7
+		g.addExplosion(
+			cx+math.Cos(angle)*dist,
+			cy+math.Sin(angle)*dist*0.6,
+			50+rand.Float64()*90,
+			24+rand.Intn(20),
+			255,
+			uint8(120+rand.Intn(110)),
+			40,
+		)
+	}
+	g.shake = 32
+
+	for i := 0; i < 3; i++ {
+		g.powerUps = append(g.powerUps, PowerUp{
+			x:    cx - 12 + (rand.Float64()*2-1)*90,
+			y:    cy,
+			kind: rand.Intn(3),
+		})
+	}
+
+	g.boss = nil
+	g.enemyBullets = nil
+	g.startTime = g.startTime.Add(time.Duration(g.bossFightFrames) * time.Second / time.Duration(ebiten.TPS()))
+	g.bossFightFrames = 0
 }
 
 func comboMultiplier(combo int) int {
@@ -711,6 +981,7 @@ func (g *Game) Draw(screen *ebiten.Image) {
 	case statePaused:
 		g.drawWorld(screen)
 		g.drawHUD(screen)
+		g.drawBossWarning(screen)
 		g.drawPause(screen)
 	case stateGameOver:
 		g.drawWorld(screen)
@@ -719,6 +990,7 @@ func (g *Game) Draw(screen *ebiten.Image) {
 	default:
 		g.drawWorld(screen)
 		g.drawHUD(screen)
+		g.drawBossWarning(screen)
 	}
 }
 
@@ -740,8 +1012,10 @@ func (g *Game) drawStars(screen *ebiten.Image) {
 func (g *Game) drawWorld(screen *ebiten.Image) {
 	sx, sy := g.shakeX, g.shakeY
 	g.drawPowerUps(screen, sx, sy)
+	g.drawBoss(screen, sx, sy)
 	g.drawEnemies(screen, sx, sy)
 	g.drawBullets(screen, sx, sy)
+	g.drawEnemyBullets(screen, sx, sy)
 	g.drawExplosions(screen, sx, sy)
 	g.drawPlayer(screen, sx, sy)
 }
@@ -764,6 +1038,47 @@ func (g *Game) drawPlayer(screen *ebiten.Image, sx, sy float64) {
 		op.ColorScale.ScaleAlpha(0.35)
 	}
 	screen.DrawImage(g.player, op)
+}
+
+func (g *Game) drawBoss(screen *ebiten.Image, sx, sy float64) {
+	b := g.boss
+	if b == nil {
+		return
+	}
+	x, y := b.x+sx, b.y+sy
+
+	wing := color.RGBA{70, 22, 96, 255}
+	body := color.RGBA{110, 42, 140, 255}
+	if b.hitFlash > 0 {
+		wing = color.RGBA{210, 200, 230, 255}
+		body = color.RGBA{255, 255, 255, 255}
+	}
+
+	ebitenutil.DrawRect(screen, x, y+45, b.w, 70, wing)
+	ebitenutil.DrawRect(screen, x+50, y+30, b.w-100, b.h-50, wing)
+	ebitenutil.DrawRect(screen, x+70, y, b.w-140, b.h, body)
+	ebitenutil.DrawRect(screen, x+92, y+16, b.w-184, b.h-32, color.RGBA{140, 60, 170, 255})
+
+	ebitenutil.DrawRect(screen, x+55, y+b.h-42, 42, 48, color.RGBA{45, 45, 65, 255})
+	ebitenutil.DrawRect(screen, x+b.w-97, y+b.h-42, 42, 48, color.RGBA{45, 45, 65, 255})
+
+	pulse := 0.5 + 0.5*math.Sin(float64(g.tick)*0.15)
+	core := uint8(140 + 110*pulse)
+	ebitenutil.DrawCircle(screen, x+b.w/2, y+b.h/2, 36, color.RGBA{core, 50, 210, 255})
+	ebitenutil.DrawCircle(screen, x+b.w/2, y+b.h/2, 16, color.RGBA{255, 245, 255, 255})
+
+	ebitenutil.DrawCircle(screen, x+88, y+62, 10, color.RGBA{255, 70, 70, 255})
+	ebitenutil.DrawCircle(screen, x+b.w-88, y+62, 10, color.RGBA{255, 70, 70, 255})
+
+	ebitenutil.DrawRect(screen, x+b.w/2-3, y-14, 6, 18, color.RGBA{200, 80, 240, 255})
+}
+
+func (g *Game) drawEnemyBullets(screen *ebiten.Image, sx, sy float64) {
+	for _, eb := range g.enemyBullets {
+		ebitenutil.DrawCircle(screen, eb.x+sx, eb.y+sy, eb.r+3, color.RGBA{255, 70, 50, 90})
+		ebitenutil.DrawCircle(screen, eb.x+sx, eb.y+sy, eb.r, color.RGBA{255, 140, 80, 255})
+		ebitenutil.DrawCircle(screen, eb.x+sx, eb.y+sy, eb.r*0.45, color.RGBA{255, 240, 210, 255})
+	}
 }
 
 func (g *Game) drawEnemies(screen *ebiten.Image, sx, sy float64) {
@@ -881,19 +1196,77 @@ func (g *Game) drawHUD(screen *ebiten.Image) {
 		ebitenutil.DrawRect(screen, 1660, 172, barW, 12, color.RGBA{90, 220, 255, 255})
 	}
 
+	if g.boss != nil || g.bossWarn > 0 {
+		g.drawBossBar(screen)
+	}
+
 	if g.combo >= 3 {
 		label := fmt.Sprintf("COMBO %d   x%d", g.combo, comboMultiplier(g.combo))
 		c := color.RGBA{255, 230, 90, 255}
 		if g.combo >= 10 {
 			c = color.RGBA{255, 120, 60, 255}
 		}
+		comboY := 72
+		if g.boss != nil || g.bossWarn > 0 {
+			comboY = 118
+		}
 		w := font.MeasureString(mediumFont, label).Round()
-		text.Draw(screen, label, mediumFont, screenWidth/2-w/2, 72, c)
+		text.Draw(screen, label, mediumFont, screenWidth/2-w/2, comboY, c)
 	}
 
 	hint := "WASD / SETAS  Mover     ESPAÇO  Atirar     P / ESC  Pausar"
 	drawPanel(screen, Rect{24, screenHeight - 58, 690, 38}, color.RGBA{6, 10, 24, 160}, color.RGBA{0, 0, 0, 0})
 	text.Draw(screen, hint, smallFont, 40, screenHeight-31, hudDim)
+}
+
+func (g *Game) drawBossBar(screen *ebiten.Image) {
+	b := g.boss
+	if b == nil {
+		return
+	}
+
+	w := 900.0
+	x := (screenWidth - w) / 2
+	y := 44.0
+	h := 26.0
+
+	ebitenutil.DrawRect(screen, x-2, y-2, w+4, h+4, color.RGBA{170, 45, 70, 255})
+	ebitenutil.DrawRect(screen, x, y, w, h, color.RGBA{28, 8, 14, 235})
+
+	frac := float64(b.hp) / float64(b.maxHP)
+	if frac < 0 {
+		frac = 0
+	}
+	fill := color.RGBA{230, 40, 70, 255}
+	if frac < 0.35 {
+		fill = color.RGBA{255, 95, 40, 255}
+	}
+	ebitenutil.DrawRect(screen, x, y, w*frac, h, fill)
+	ebitenutil.DrawRect(screen, x, y, w*frac, 6, color.RGBA{255, 150, 170, 255})
+
+	text.Draw(screen, "CHEFÃO", smallFont, int(x)+10, int(y)+20, color.White)
+	pct := fmt.Sprintf("%d%%", int(frac*100))
+	pw := font.MeasureString(smallFont, pct).Round()
+	text.Draw(screen, pct, smallFont, int(x+w)-pw-10, int(y)+20, color.White)
+}
+
+func (g *Game) drawBossWarning(screen *ebiten.Image) {
+	if g.bossWarn <= 0 {
+		return
+	}
+	if (g.bossWarn/12)%2 == 0 {
+		return
+	}
+
+	ebitenutil.DrawRect(screen, 0, 0, screenWidth, screenHeight, color.RGBA{255, 0, 0, 40})
+
+	msg := "ALERTA DE CHEFÃO"
+	mw := font.MeasureString(titleFont, msg).Round()
+	text.Draw(screen, msg, titleFont, screenWidth/2-mw/2, 440, color.RGBA{255, 70, 70, 255})
+
+	sub := "PREPARE-SE"
+	sw := font.MeasureString(mediumFont, sub).Round()
+	text.Draw(screen, sub, mediumFont, screenWidth/2-sw/2, 500, color.RGBA{255, 180, 120, 255})
 }
 
 func drawButton(screen *ebiten.Image, r Rect, label string, primary bool) {
@@ -1081,6 +1454,17 @@ func bulletHitsEnemy(b Bullet, e Enemy) bool {
 		b.x+bulletWidth > e.x &&
 		b.y < e.y+e.size &&
 		b.y+bulletHeight > e.y
+}
+
+func bulletHitsBoss(b Bullet, boss *Boss) bool {
+	return b.x < boss.x+boss.w &&
+		b.x+bulletWidth > boss.x &&
+		b.y < boss.y+boss.h &&
+		b.y+bulletHeight > boss.y
+}
+
+func circleHitsPlayer(eb EnemyBullet, px, py float64) bool {
+	return rectsOverlap(eb.x-eb.r, eb.y-eb.r, eb.r*2, eb.r*2, px, py, playerWidth, playerHeight)
 }
 
 func rectsOverlap(x1, y1, w1, h1, x2, y2, w2, h2 float64) bool {
